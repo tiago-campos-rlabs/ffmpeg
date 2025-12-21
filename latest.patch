@@ -1,0 +1,65 @@
+diff --git a/libavformat/hls.c b/libavformat/hls.c
+index b18c599b3b..dda9ffea6c 100644
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -2312,7 +2312,12 @@ static int hls_read_header(AVFormatContext *s)
+             pls->ctx->max_analyze_duration = s->max_analyze_duration > 0 ? s->max_analyze_duration : 4 * AV_TIME_BASE;
+             pls->ctx->interrupt_callback = s->interrupt_callback;
+             url = av_strdup(pls->segments[0]->url);
+-            ret = av_probe_input_buffer(&pls->pb.pub, &in_fmt, url, NULL, 0, 0);
++            /*
++             * Pass empty string for filename to avoid extension-based format detection.
++             * HLS segments may use obfuscated extensions (e.g., .png for video) to
++             * bypass content filters. We rely purely on content probing.
++             */
++            ret = av_probe_input_buffer(&pls->pb.pub, &in_fmt, "", NULL, 0, 0);
+ 
+             for (int n = 0; n < pls->n_segments; n++)
+                 if (ret >= 0)
+diff --git a/libavformat/http.c b/libavformat/http.c
+index 7bad4502cb..25ed53d5f6 100644
+--- a/libavformat/http.c
++++ b/libavformat/http.c
+@@ -280,6 +280,12 @@ static int h2_on_data_chunk_recv_callback(nghttp2_session *session,
+     if (stream_id != s->h2_stream_id)
+         return 0;
+ 
++    /* Debug: log first bytes of first chunk */
++    if (s->h2_recv_buf_len == 0 && len >= 8) {
++        av_log(h, AV_LOG_DEBUG, "HTTP/2 first data bytes: %02x %02x %02x %02x %02x %02x %02x %02x (len=%zu)\n",
++               data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], len);
++    }
++
+     /* Expand buffer if needed */
+     if (s->h2_recv_buf_len + len > s->h2_recv_buf_size) {
+         size_t new_size = s->h2_recv_buf_size ? s->h2_recv_buf_size * 2 : H2_RECV_BUF_SIZE;
+@@ -2241,11 +2247,27 @@ static int http_read_stream(URLContext *h, uint8_t *buf, int size)
+             return (int)to_copy;
+         }
+ 
+-        /* No data available yet, return EAGAIN for non-blocking */
++        /* No data available yet, keep trying until we get data or stream closes */
+         if (h->flags & AVIO_FLAG_NONBLOCK)
+             return AVERROR(EAGAIN);
+ 
+-        return 0;
++        /* Loop until we have data or stream is closed */
++        while (!s->h2_stream_closed) {
++            err = h2_recv_data(h);
++            if (err < 0)
++                return err;
++
++            available = s->h2_recv_buf_len - s->h2_recv_buf_pos;
++            if (available > 0) {
++                size_t to_copy = FFMIN(available, (size_t)size);
++                memcpy(buf, s->h2_recv_buf + s->h2_recv_buf_pos, to_copy);
++                s->h2_recv_buf_pos += to_copy;
++                s->off += to_copy;
++                return (int)to_copy;
++            }
++        }
++
++        return AVERROR_EOF;
+     }
+ #endif /* CONFIG_LIBNGHTTP2 */
+ 

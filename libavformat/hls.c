@@ -2312,7 +2312,12 @@ static int hls_read_header(AVFormatContext *s)
             pls->ctx->max_analyze_duration = s->max_analyze_duration > 0 ? s->max_analyze_duration : 4 * AV_TIME_BASE;
             pls->ctx->interrupt_callback = s->interrupt_callback;
             url = av_strdup(pls->segments[0]->url);
-            ret = av_probe_input_buffer(&pls->pb.pub, &in_fmt, url, NULL, 0, 0);
+            /*
+             * Pass empty string for filename to avoid extension-based format detection.
+             * HLS segments may use obfuscated extensions (e.g., .png for video) to
+             * bypass content filters. We rely purely on content probing.
+             */
+            ret = av_probe_input_buffer(&pls->pb.pub, &in_fmt, "", NULL, 0, 0);
 
             for (int n = 0; n < pls->n_segments; n++)
                 if (ret >= 0)

@@ -280,6 +280,12 @@ static int h2_on_data_chunk_recv_callback(nghttp2_session *session,
     if (stream_id != s->h2_stream_id)
         return 0;
 
+    /* Debug: log first bytes of first chunk */
+    if (s->h2_recv_buf_len == 0 && len >= 8) {
+        av_log(h, AV_LOG_DEBUG, "HTTP/2 first data bytes: %02x %02x %02x %02x %02x %02x %02x %02x (len=%zu)\n",
+               data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], len);
+    }
+
     /* Expand buffer if needed */
     if (s->h2_recv_buf_len + len > s->h2_recv_buf_size) {
         size_t new_size = s->h2_recv_buf_size ? s->h2_recv_buf_size * 2 : H2_RECV_BUF_SIZE;
@@ -2241,11 +2247,27 @@ static int http_read_stream(URLContext *h, uint8_t *buf, int size)
             return (int)to_copy;
         }
 
-        /* No data available yet, return EAGAIN for non-blocking */
+        /* No data available yet, keep trying until we get data or stream closes */
         if (h->flags & AVIO_FLAG_NONBLOCK)
             return AVERROR(EAGAIN);
 
-        return 0;
+        /* Loop until we have data or stream is closed */
+        while (!s->h2_stream_closed) {
+            err = h2_recv_data(h);
+            if (err < 0)
+                return err;
+
+            available = s->h2_recv_buf_len - s->h2_recv_buf_pos;
+            if (available > 0) {
+                size_t to_copy = FFMIN(available, (size_t)size);
+                memcpy(buf, s->h2_recv_buf + s->h2_recv_buf_pos, to_copy);
+                s->h2_recv_buf_pos += to_copy;
+                s->off += to_copy;
+                return (int)to_copy;
+            }
+        }
+
+        return AVERROR_EOF;
     }
 #endif /* CONFIG_LIBNGHTTP2 */
 
