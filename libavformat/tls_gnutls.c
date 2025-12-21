@@ -30,6 +30,8 @@
 #include "os_support.h"
 #include "url.h"
 #include "tls.h"
+#include "libavutil/avstring.h"
+#include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/thread.h"
 
@@ -204,6 +206,38 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
         if (s->mtu)
             gnutls_dtls_set_mtu(c->session, s->mtu);
     gnutls_set_default_priority(c->session);
+
+    /* Set up ALPN if requested */
+    if (s->alpn) {
+        gnutls_datum_t alpn_protos[8];
+        int alpn_count = 0;
+        char *alpn_copy = av_strdup(s->alpn);
+        char *saveptr = NULL;
+        char *token;
+
+        if (!alpn_copy) {
+            ret = AVERROR(ENOMEM);
+            goto fail;
+        }
+
+        token = av_strtok(alpn_copy, ",", &saveptr);
+        while (token && alpn_count < 8) {
+            alpn_protos[alpn_count].data = (unsigned char *)token;
+            alpn_protos[alpn_count].size = strlen(token);
+            alpn_count++;
+            token = av_strtok(NULL, ",", &saveptr);
+        }
+
+        if (alpn_count > 0) {
+            ret = gnutls_alpn_set_protocols(c->session, alpn_protos, alpn_count, 0);
+            if (ret < 0) {
+                av_log(h, AV_LOG_WARNING, "Failed to set ALPN protocols: %s\n",
+                       gnutls_strerror(ret));
+            }
+        }
+        av_free(alpn_copy);
+    }
+
     do {
         if (ff_check_interrupt(&h->interrupt_callback)) {
             ret = AVERROR_EXIT;
@@ -217,6 +251,18 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
         }
     } while (ret);
     c->need_shutdown = 1;
+
+    /* Get selected ALPN protocol after handshake */
+    if (s->alpn) {
+        gnutls_datum_t selected;
+        ret = gnutls_alpn_get_selected_protocol(c->session, &selected);
+        if (ret == 0 && selected.size > 0) {
+            av_freep(&s->alpn_selected);
+            s->alpn_selected = av_strndup((const char *)selected.data, selected.size);
+            av_log(h, AV_LOG_DEBUG, "ALPN protocol selected: %s\n", s->alpn_selected);
+        }
+        ret = 0; /* Reset ret, ALPN selection failure is not fatal */
+    }
     if (s->verify) {
         unsigned int status, cert_list_size;
         gnutls_x509_crt_t cert;

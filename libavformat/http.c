@@ -297,6 +297,20 @@ static int h2_on_header_callback(nghttp2_session *session,
         if (!s->cookies) {
             s->cookies = av_strndup((const char *)value, valuelen);
         }
+    } else if (namelen == 13 && !av_strncasecmp((const char *)name, "content-range", 13)) {
+        /* Parse "bytes $from-$to/$document_size" like HTTP/1.1 does */
+        const char *p = (const char *)value;
+        if (!strncmp(p, "bytes ", 6)) {
+            const char *slash;
+            p += 6;
+            s->off = strtoull(p, NULL, 10);
+            if ((slash = strchr(p, '/')) && strlen(slash) > 0)
+                s->filesize_from_content_range = strtoull(slash + 1, NULL, 10);
+            if (s->seekable == -1)
+                h->is_streamed = 0; /* we _can_ in fact seek */
+            av_log(h, AV_LOG_DEBUG, "HTTP/2 content-range: off=%"PRIu64" filesize=%"PRIu64"\n",
+                   s->off, s->filesize_from_content_range);
+        }
     }
 
     return 0;
@@ -364,6 +378,11 @@ static int h2_on_frame_recv_callback(nghttp2_session *session,
     if (frame->hd.type == NGHTTP2_GOAWAY) {
         s->h2_goaway = 1;
         av_log(h, AV_LOG_DEBUG, "HTTP/2 GOAWAY received\n");
+    } else if (frame->hd.type == NGHTTP2_HEADERS &&
+               frame->headers.cat == NGHTTP2_HCAT_RESPONSE) {
+        /* Headers complete - apply filesize from Content-Range like HTTP/1.1 does */
+        if (s->filesize_from_content_range != UINT64_MAX)
+            s->filesize = s->filesize_from_content_range;
     }
 
     return 0;
@@ -442,6 +461,7 @@ static void h2_stream_reset(HTTPContext *s)
     s->h2_stream_closed = 0;
     s->http_code = 0;
     s->filesize = UINT64_MAX;
+    s->filesize_from_content_range = UINT64_MAX;
     s->off = 0;
 }
 
