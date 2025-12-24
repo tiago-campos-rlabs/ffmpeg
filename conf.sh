@@ -67,4 +67,5 @@
   --enable-opengl \
   --enable-openssl \
   --enable-sdl2 \
+  --enable-static \
   --enable-libnghttp2

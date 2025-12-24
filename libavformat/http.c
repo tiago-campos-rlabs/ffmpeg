@@ -1948,7 +1948,6 @@ static int http_connect(URLContext *h, const char *path, const char *local_path,
                 s->is_http2 = 1;
                 av_freep(&s->http_version);
                 s->http_version = av_strdup("2");
-                av_log(h, AV_LOG_INFO, "Using HTTP/2\n");
             }
             av_free(alpn_selected);
         }
@@ -1959,6 +1958,16 @@ static int http_connect(URLContext *h, const char *path, const char *local_path,
                 err = h2_session_init(h);
                 if (err < 0)
                     return err;
+
+                /* Initialize stream state for new session (like HTTP/1.1 does below) */
+                s->off = 0;
+                off = 0;  /* Update local variable to match */
+                s->filesize = UINT64_MAX;
+                s->filesize_from_content_range = UINT64_MAX;
+                s->h2_recv_buf_len = 0;
+                s->h2_recv_buf_pos = 0;
+                s->h2_stream_id = 0;
+                s->h2_stream_closed = 0;
             }
 
             /* Determine method */
