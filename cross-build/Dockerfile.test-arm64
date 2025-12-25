@@ -1,0 +1,20 @@
+# ARM64 Test Image for FFmpeg
+# Tests the fully static FFmpeg binaries
+
+FROM arm64v8/debian:bookworm-slim
+
+# Minimal utilities (static binary needs no runtime deps)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    file \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy FFmpeg binaries (fully static)
+COPY opt/ffmpeg/bin/ffmpeg /usr/local/bin/
+COPY opt/ffmpeg/bin/ffprobe /usr/local/bin/
+
+# Verify binary type and that it works
+RUN file /usr/local/bin/ffmpeg && ffmpeg -version
+
+WORKDIR /workspace
+CMD ["bash"]

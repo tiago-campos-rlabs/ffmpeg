@@ -1,0 +1,240 @@
+# Stage 1: ARM64 Sysroot Builder
+# This runs under QEMU emulation to install ARM64 development packages
+# The resulting sysroot is then used for native cross-compilation
+
+FROM --platform=linux/arm64 debian:bookworm
+
+LABEL description="ARM64 sysroot builder for FFmpeg cross-compilation"
+
+# Avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Enable all repository components
+RUN echo "deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list && \
+    echo "deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    echo "deb http://deb.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list
+
+# Update and install all development dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Build essentials
+    build-essential \
+    pkg-config \
+    nasm \
+    yasm \
+    cmake \
+    meson \
+    ninja-build \
+    autoconf \
+    automake \
+    libtool \
+    git \
+    ca-certificates \
+    # Video codecs
+    libx264-dev \
+    libx265-dev \
+    libvpx-dev \
+    libaom-dev \
+    libsvtav1-dev \
+    libdav1d-dev \
+    libopenh264-dev \
+    libxvidcore-dev \
+    libtheora-dev \
+    libopenjp2-7-dev \
+    libvidstab-dev \
+    libsnappy-dev \
+    # Audio codecs
+    libopus-dev \
+    libmp3lame-dev \
+    libvorbis-dev \
+    libopencore-amrnb-dev \
+    libopencore-amrwb-dev \
+    libvo-amrwbenc-dev \
+    libspeex-dev \
+    # Audio processing
+    libsoxr-dev \
+    librubberband-dev \
+    libbs2b-dev \
+    libmysofa-dev \
+    libgme-dev \
+    lv2-dev \
+    liblilv-dev \
+    # Subtitles and text
+    libfreetype6-dev \
+    libfontconfig1-dev \
+    libfribidi-dev \
+    libass-dev \
+    libharfbuzz-dev \
+    libtesseract-dev \
+    # Image formats
+    libwebp-dev \
+    # Network/streaming
+    libsrt-openssl-dev \
+    libssh-dev \
+    librist-dev \
+    libzmq3-dev \
+    libssl-dev \
+    libnghttp2-dev \
+    libxml2-dev \
+    # Media/disc support
+    libbluray-dev \
+    libcdio-paranoia-dev \
+    libchromaprint-dev \
+    liblzma-dev \
+    # Hardware/display
+    libsdl2-dev \
+    libpulse-dev \
+    libasound2-dev \
+    libopenal-dev \
+    libvulkan-dev \
+    glslang-tools \
+    libshaderc-dev \
+    # Python (for vapoursynth)
+    python3-dev \
+    python3-mako \
+    python3-jinja2 \
+    liblcms2-dev \
+    # Missing dependencies
+    libmbedtls-dev \
+    libcjson-dev \
+    libjpeg-dev \
+    libgif-dev \
+    libtiff-dev \
+    libnuma-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create build directory for source-built libraries
+WORKDIR /build
+
+# Build zimg from source (Debian version too old)
+# Note: --recursive needed for graphengine submodule
+RUN git clone --depth 1 --recursive https://github.com/sekrit-twc/zimg.git && \
+    cd zimg && \
+    ./autogen.sh && \
+    ./configure --prefix=/usr --enable-static --disable-shared && \
+    make -j$(nproc) && \
+    make install && \
+    cd .. && rm -rf zimg
+
+# Build fdk-aac from source (not in Debian main)
+RUN git clone --depth 1 https://github.com/mstorsjo/fdk-aac.git && \
+    cd fdk-aac && \
+    autoreconf -fiv && \
+    ./configure --prefix=/usr --enable-static --disable-shared && \
+    make -j$(nproc) && \
+    make install && \
+    cd .. && rm -rf fdk-aac
+
+# Build kvazaar from source (not in Debian)
+RUN git clone --depth 1 https://github.com/ultravideo/kvazaar.git && \
+    cd kvazaar && \
+    autoreconf -fiv && \
+    ./configure --prefix=/usr --enable-static --disable-shared && \
+    make -j$(nproc) && \
+    make install && \
+    cd .. && rm -rf kvazaar
+
+# Build vapoursynth from source
+RUN apt-get update && apt-get install -y --no-install-recommends cython3 python3-pip && \
+    pip3 install --break-system-packages cython && \
+    git clone --depth 1 https://github.com/vapoursynth/vapoursynth.git && \
+    cd vapoursynth && \
+    autoreconf -fiv && \
+    ./configure --prefix=/usr --disable-python-module --enable-static --disable-shared && \
+    make -j$(nproc) && \
+    make install && \
+    cd .. && rm -rf vapoursynth && \
+    rm -rf /var/lib/apt/lists/*
+
+# Build libaribcaption from source
+RUN git clone --depth 1 https://github.com/xqq/libaribcaption.git && \
+    cd libaribcaption && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_INSTALL_PREFIX=/usr \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DBUILD_SHARED_LIBS=OFF \
+          .. && \
+    make -j$(nproc) && \
+    make install && \
+    cd ../.. && rm -rf libaribcaption
+
+# Build libplacebo from source (Debian version too old)
+RUN git clone --recursive https://github.com/haasn/libplacebo.git && \
+    cd libplacebo && \
+    git checkout v6.338.1 && \
+    git submodule update --init --recursive && \
+    ls -R 3rdparty && \
+    mkdir build && cd build && \
+    meson setup .. \
+        --prefix=/usr \
+        --buildtype=release \
+        --default-library=static \
+        -Dvulkan=enabled \
+        -Dshaderc=enabled \
+        -Dlcms=enabled \
+        -Dopengl=disabled \
+        -Ddemos=false \
+        --force-fallback-for=vulkan-headers && \
+    ninja && \
+    ninja install && \
+    sed -i 's/Libs: -L${libdir} -lplacebo/Libs: -L${libdir} -lplacebo -lstdc++/' /usr/lib/aarch64-linux-gnu/pkgconfig/libplacebo.pc && \
+    cd ../.. && rm -rf libplacebo
+
+# Build SVT-AV1 from source (Debian only has shared libs)
+RUN git clone --depth 1 https://gitlab.com/AOMediaCodec/SVT-AV1.git && \
+    cd SVT-AV1 && \
+    cd Build && \
+    cmake .. -G Ninja -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release && \
+    ninja && \
+    ninja install && \
+    cd ../.. && rm -rf SVT-AV1
+
+# Update library cache
+RUN ldconfig
+
+# Fix broken pkg-config files from Debian
+# librist.pc has absolute path to libcjson.so
+RUN sed -i 's|/usr/lib/aarch64-linux-gnu/libcjson.so[^ ]*|-lcjson|g' /usr/lib/aarch64-linux-gnu/pkgconfig/librist.pc || true
+# norm.pc has bare libprotokit.a
+RUN sed -i 's|libprotokit.a|-lprotokit|g' /usr/lib/aarch64-linux-gnu/pkgconfig/norm.pc || true
+
+# Create symlink for libshaderc.a -> libshaderc_combined.a (Debian quirk)
+# And remove shared libs to force static linking
+RUN ln -sf libshaderc_combined.a /usr/lib/aarch64-linux-gnu/libshaderc.a && \
+    rm -f /usr/lib/aarch64-linux-gnu/libshaderc.so*
+
+# Create a script to package the sysroot
+# Note: We need to preserve the exact directory structure for cross-compilation
+RUN echo '#!/bin/bash\n\
+set -e\n\
+echo "Creating sysroot tarball..."\n\
+\n\
+# Create a staging directory with proper structure\n\
+mkdir -p /sysroot-staging/lib\n\
+mkdir -p /sysroot-staging/usr/lib\n\
+mkdir -p /sysroot-staging/usr/share\n\
+\n\
+# Copy the required directories - preserve the aarch64-linux-gnu path!\n\
+# Use -L to follow symlinks (e.g., lv2 headers are symlinks to /lib/lv2)\n\
+cp -aL /usr/include /sysroot-staging/usr/\n\
+cp -a /usr/lib/aarch64-linux-gnu /sysroot-staging/usr/lib/aarch64-linux-gnu\n\
+# Also copy static libraries built from source (installed in /usr/lib)\n\
+cp -a /usr/lib/*.a /sysroot-staging/usr/lib/ 2>/dev/null || true\n\
+cp -a /usr/lib/pkgconfig /sysroot-staging/usr/lib/ 2>/dev/null || true\n\
+cp -a /usr/share/pkgconfig /sysroot-staging/usr/share/ 2>/dev/null || mkdir -p /sysroot-staging/usr/share/pkgconfig\n\
+cp -a /lib/aarch64-linux-gnu /sysroot-staging/lib/aarch64-linux-gnu\n\
+# LV2 headers are symlinks pointing to /lib/lv2, so include it\n\
+cp -a /lib/lv2 /sysroot-staging/lib/ 2>/dev/null || true\n\
+\n\
+# Create the critical symlink for the dynamic linker\n\
+# The linker looks for /lib/ld-linux-aarch64.so.1\n\
+ln -sf aarch64-linux-gnu/ld-linux-aarch64.so.1 /sysroot-staging/lib/ld-linux-aarch64.so.1\n\
+\n\
+# Create the tarball from the staging directory\n\
+cd /sysroot-staging\n\
+tar -czf /output/sysroot-arm64.tar.gz .\n\
+\n\
+echo "Sysroot tarball created: /output/sysroot-arm64.tar.gz"\n\
+ls -lh /output/sysroot-arm64.tar.gz\n\
+' > /create-sysroot.sh && chmod +x /create-sysroot.sh
+
+CMD ["/create-sysroot.sh"]

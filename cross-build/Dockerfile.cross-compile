@@ -1,0 +1,202 @@
+# Stage 2: x86_64 Cross-Compilation Environment
+# This runs natively on x86_64 and uses the ARM64 sysroot for cross-compilation
+
+FROM debian:bookworm
+
+LABEL description="x86_64 cross-compiler for ARM64 FFmpeg builds"
+
+# Avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install cross-compilation toolchain and build tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Cross-compiler toolchain
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
+    binutils-aarch64-linux-gnu \
+    # Build tools
+    make \
+    pkg-config \
+    nasm \
+    yasm \
+    git \
+    ca-certificates \
+    # For configure scripts
+    autoconf \
+    automake \
+    libtool \
+    cmake \
+    meson \
+    ninja-build \
+    texinfo \
+    # Utilities
+    wget \
+    xz-utils \
+    bzip2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up cross-compilation environment variables
+ENV CROSS_PREFIX=aarch64-linux-gnu-
+ENV CC=aarch64-linux-gnu-gcc
+ENV CXX=aarch64-linux-gnu-g++
+ENV AR=aarch64-linux-gnu-ar
+ENV RANLIB=aarch64-linux-gnu-ranlib
+ENV STRIP=aarch64-linux-gnu-strip
+ENV NM=aarch64-linux-gnu-nm
+ENV LD=aarch64-linux-gnu-ld
+
+# Sysroot will be mounted/copied to this location
+ENV SYSROOT=/sysroot-arm64
+
+# Create a pkg-config wrapper for cross-compilation
+RUN cat > /usr/local/bin/aarch64-linux-gnu-pkg-config << 'EOF'
+#!/bin/bash
+SYSROOT=/sysroot-arm64
+export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/aarch64-linux-gnu/pkgconfig:${SYSROOT}/lib/aarch64-linux-gnu/pkgconfig:${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
+export PKG_CONFIG_LIBDIR="${SYSROOT}/usr/lib/aarch64-linux-gnu/pkgconfig:${SYSROOT}/lib/aarch64-linux-gnu/pkgconfig:${SYSROOT}/usr/lib/pkgconfig"
+export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
+exec pkg-config "$@"
+EOF
+RUN chmod +x /usr/local/bin/aarch64-linux-gnu-pkg-config
+
+WORKDIR /ffmpeg
+
+# Create the cross-compile script using heredoc for reliable script generation
+RUN cat > /cross-compile.sh << 'EOF'
+#!/bin/bash
+set -e
+
+SYSROOT=/sysroot-arm64
+PREFIX=/opt/ffmpeg
+
+echo "=== FFmpeg ARM64 Cross-Compilation ==="
+echo "Sysroot: ${SYSROOT}"
+echo "Prefix: ${PREFIX}"
+echo ""
+
+# Verify sysroot exists
+if [ ! -d "${SYSROOT}/usr/include" ]; then
+    echo "ERROR: Sysroot not found at ${SYSROOT}"
+    echo "Make sure the ARM64 sysroot is extracted properly."
+    exit 1
+fi
+
+# Clean any previous build
+make distclean 2>/dev/null || true
+
+echo "=== Configuring FFmpeg ==="
+# Configure FFmpeg for cross-compilation
+./configure \
+    --prefix=${PREFIX} \
+    --arch=aarch64 \
+    --target-os=linux \
+    --cross-prefix=aarch64-linux-gnu- \
+    --sysroot=${SYSROOT} \
+    --enable-cross-compile \
+    --pkg-config=aarch64-linux-gnu-pkg-config \
+    --extra-cflags="-I${SYSROOT}/usr/include -I${SYSROOT}/usr/include/aarch64-linux-gnu" \
+    --extra-ldflags="-L${SYSROOT}/usr/lib/aarch64-linux-gnu -L${SYSROOT}/lib/aarch64-linux-gnu -static" \
+    --extra-ldexeflags="-static" \
+    --extra-libs="-lstdc++ -lm -lpthread -ldl" \
+    --extra-version=cross-arm64 \
+    --enable-gpl \
+    --enable-version3 \
+    --enable-nonfree \
+    --enable-static \
+    --disable-shared \
+    --enable-pic \
+    --enable-libx264 \
+    --enable-libx265 \
+    --enable-libvpx \
+    --enable-libopus \
+    --enable-libmp3lame \
+    --enable-libvorbis \
+    --enable-libtheora \
+    --enable-libopenjpeg \
+    --enable-libvidstab \
+    --enable-libaom \
+    --enable-libsvtav1 \
+    --enable-libdav1d \
+    --enable-libfdk-aac \
+    --enable-libzimg \
+    --enable-librubberband \
+    --enable-libsrt \
+    --enable-libssh \
+    --enable-libxml2 \
+    --enable-libfreetype \
+    --enable-libfontconfig \
+    --enable-libfribidi \
+    --enable-libass \
+    --enable-libharfbuzz \
+    --enable-libwebp \
+    --enable-libopencore-amrnb \
+    --enable-libopencore-amrwb \
+    --enable-libvo-amrwbenc \
+    --enable-libspeex \
+    --enable-libsoxr \
+    --enable-libzmq \
+    --enable-libbluray \
+    --enable-libcdio \
+    --enable-chromaprint \
+    --enable-libgme \
+    --enable-libsnappy \
+    --enable-libkvazaar \
+    --enable-libopenh264 \
+    --enable-libmysofa \
+    --enable-libbs2b \
+    --enable-libxvid \
+    --enable-librist \
+    --enable-libtesseract \
+    --enable-openssl \
+    --enable-libnghttp2 \
+    --enable-vapoursynth \
+    --enable-lv2 \
+    --enable-libaribcaption \
+    --pkg-config-flags="--static"
+
+if [ $? -ne 0 ]; then
+    echo "Configure failed. Showing config.log:"
+    cat ffbuild/config.log 2>/dev/null || echo "No config.log found"
+    exit 1
+fi
+
+# Fix config.h for math functions detection failures (only if file exists)
+if [ -f ffbuild/config.h ]; then
+    sed -i 's/#define HAVE_CBRT 0/#define HAVE_CBRT 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_CBRTF 0/#define HAVE_CBRTF 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_COPYSIGN 0/#define HAVE_COPYSIGN 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_TRUNC 0/#define HAVE_TRUNC 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_TRUNCF 0/#define HAVE_TRUNCF 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_RINT 0/#define HAVE_RINT 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_LRINT 0/#define HAVE_LRINT 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_LRINTF 0/#define HAVE_LRINTF 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_ROUND 0/#define HAVE_ROUND 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_ROUNDF 0/#define HAVE_ROUNDF 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_ERF 0/#define HAVE_ERF 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_HYPOT 0/#define HAVE_HYPOT 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_ISNAN 0/#define HAVE_ISNAN 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_ISINF 0/#define HAVE_ISINF 1/' ffbuild/config.h
+    sed -i 's/#define HAVE_ISFINITE 0/#define HAVE_ISFINITE 1/' ffbuild/config.h
+fi
+
+echo ""
+echo "=== Building FFmpeg ==="
+make -j$(nproc)
+
+echo ""
+echo "=== Installing FFmpeg ==="
+make DESTDIR=/output install
+
+echo ""
+echo "=== Build Complete ==="
+echo "Output files:"
+ls -lh /output${PREFIX}/bin/
+
+# Verify the binaries are ARM64
+echo ""
+echo "Binary architecture verification:"
+file /output${PREFIX}/bin/ffmpeg
+EOF
+RUN chmod +x /cross-compile.sh
+
+CMD ["/cross-compile.sh"]
